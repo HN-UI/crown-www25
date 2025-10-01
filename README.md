@@ -1,5 +1,5 @@
 # [WWW'25] CROWN: A Novel Approach to Comprehending Users' Preferences for Accurate Personalized News Recommendation
-This repository provides an implementation of *CROWN* as described in the paper: [CROWN: A Novel Approach to Comprehending Users' Preferences for Accurate Personalized News Recommendation](https://arxiv.org/abs/2310.09401) by Yunyong Ko, Seongeun Ryu and Sang-Wook Kim, In Proceedings of the ACM Web Conference (WWW) 2025
+This repository provides an implementation of *CROWN* as described in the paper: [CROWN: A Novel Approach to Comprehending Users' Preferences for Accurate Personalized News Recommendation](https://dl.acm.org/doi/10.1145/3696410.3714752) by Yunyong Ko, Seongeun Ryu and Sang-Wook Kim, In Proceedings of the ACM Web Conference (WWW) 2025
 
 ## The overview of CROWN
 ![The overview of CROWN](./assets/CROWN_overview.PNG)
