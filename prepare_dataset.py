@@ -263,9 +263,9 @@ def generate_knowledge_entity_embedding(data_mode):
 
 
 def prepare_MIND_small():
-    download_extract_MIND_small()
+    #download_extract_MIND_small()
     preprocess_MIND_small()
-    generate_knowledge_entity_embedding('small')
+    #generate_knowledge_entity_embedding('small')
 
 
 def prepare_MIND_large():

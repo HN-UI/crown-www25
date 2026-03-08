@@ -6,7 +6,7 @@ import torch
 import random
 import numpy as np
 import json
-from prepare_dataset import prepare_MIND_small, preprocess_Adressa
+from prepare_dataset import prepare_MIND_small, prepare_MIND_large, preprocess_Adressa
 
 class Config:
     def parse_argument(self):
@@ -18,17 +18,134 @@ class Config:
         parser.add_argument('--dev_model_path', type=str, default='', help='Dev model path')
         parser.add_argument('--test_model_path', type=str, default='', help='Test model path')
         parser.add_argument('--test_output_file', type=str, default='', help='Specific test output file')
+        parser.add_argument(
+            '--test_filtering_1_1',
+            default=False,
+            action='store_true',
+            help='During test evaluation, drop candidates that were clicked (-1) in previous impressions of the same user'
+        )
+        parser.add_argument(
+            '--test_filtering_1_0',
+            default=False,
+            action='store_true',
+            help='During test evaluation, drop candidates that were clicked (-1) in previous impressions of the same user but are currently labeled -0'
+        )
+        parser.add_argument(
+            '--test_filtering_0_0',
+            default=False,
+            action='store_true',
+            help='During test evaluation, drop candidates that were non-clicked (-0) in previous impressions of the same user and are currently labeled -0'
+        )
+        parser.add_argument(
+            '--test_filtering_0_1',
+            default=False,
+            action='store_true',
+            help='During test evaluation, drop candidates that were non-clicked (-0) in previous impressions of the same user but are currently labeled -1'
+        )
         parser.add_argument('--device_id', type=int, default=0, help='Device ID of GPU')
         parser.add_argument('--seed', type=int, default=0, help='Seed for random number generator')
+        parser.add_argument('--num_runs', type=int, default=1, help='Number of repeated train/test runs in a single execution')
+        parser.add_argument('--seed_step', type=int, default=1, help='Seed increment per repeated run')
         parser.add_argument('--config_file', type=str, default='', help='Config file path')
         # Dataset config
         parser.add_argument('--dataset', type=str, default='mind', choices=['mind', 'adressa'], help='Dataset type')
+        parser.add_argument('--mind_size', type=str, default='small', choices=['small', 'large'], help='MIND dataset size')
         parser.add_argument('--tokenizer', type=str, default='MIND', choices=['MIND', 'NLTK'], help='Sentence tokenizer')
         parser.add_argument('--word_threshold', type=int, default=3, help='Word threshold')
         parser.add_argument('--max_title_length', type=int, default=32, help='Sentence truncate length for title')
         parser.add_argument('--max_abstract_length', type=int, default=128, help='Sentence truncate length for abstract') 
         # Training config
         parser.add_argument('--negative_sample_num', type=int, default=4, help='Negative sample number of each positive sample')
+        parser.add_argument(
+            '--drop_repeated_positive_clicks',
+            default=False,
+            action='store_true',
+            help='Drop training samples whose positive news was already clicked before by the same user'
+        )
+        parser.add_argument(
+            '--drop_prev_clicked_from_negatives',
+            default=False,
+            action='store_true',
+            help='Drop negative candidates that were clicked before by the same user'
+        )
+        parser.add_argument(
+            '--drop_prev_nonclicked_from_negatives',
+            default=False,
+            action='store_true',
+            help='Drop negative candidates that were shown as non-click before by the same user'
+        )
+        parser.add_argument(
+            '--promote_reclicked_negatives_to_positive',
+            default=False,
+            action='store_true',
+            help='Promote a -0 impression to positive if the same user clicked that news before'
+        )
+        parser.add_argument(
+            '--repeat_negative_weight',
+            type=float,
+            default=1.0,
+            help='Additional loss weight for negatives that were previously shown as non-clicked (-0) to the same user'
+        )
+        parser.add_argument(
+            '--repeat_negative_sampling_boost',
+            type=float,
+            default=1.0,
+            help='Sampling probability multiplier for negatives previously shown as non-clicked (-0) to the same user'
+        )
+        parser.add_argument(
+            '--repeat_positive_weight',
+            type=float,
+            default=1.0,
+            help='Additional loss weight for positives that were previously clicked (-1) by the same user'
+        )
+        parser.add_argument(
+            '--use_run_length_negative_weight',
+            default=False,
+            action='store_true',
+            help='Use run-length based weight for repeated 0->0 negatives (longer consecutive runs get larger weight)'
+        )
+        parser.add_argument(
+            '--run_length_weight_alpha',
+            type=float,
+            default=0.3,
+            help='Alpha in run-length weight: w(L)=min(cap, 1+beta+alpha*log2(L-1)) for L>=2'
+        )
+        parser.add_argument(
+            '--run_length_weight_beta',
+            type=float,
+            default=1.0,
+            help='Beta in run-length weight: w(2)=1+beta'
+        )
+        parser.add_argument(
+            '--run_length_weight_cap',
+            type=float,
+            default=3.0,
+            help='Upper bound cap for run-length weight'
+        )
+        parser.add_argument(
+            '--use_run_length_positive_weight',
+            default=False,
+            action='store_true',
+            help='Use run-length based weight for repeated 1->1 positives (longer consecutive runs get larger weight)'
+        )
+        parser.add_argument(
+            '--positive_run_length_weight_alpha',
+            type=float,
+            default=0.3,
+            help='Alpha in positive run-length weight: w(L)=min(cap, 1+beta+alpha*log2(L-1)) for L>=2'
+        )
+        parser.add_argument(
+            '--positive_run_length_weight_beta',
+            type=float,
+            default=1.0,
+            help='Beta in positive run-length weight: w(2)=1+beta'
+        )
+        parser.add_argument(
+            '--positive_run_length_weight_cap',
+            type=float,
+            default=5.0,
+            help='Upper bound cap for positive run-length weight'
+        )
         parser.add_argument('--max_history_num', type=int, default=50, help='Maximum number of history news for each user')
         parser.add_argument('--epoch', type=int, default=16, help='Training epoch')
         parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
@@ -86,11 +203,12 @@ class Config:
         # self.head_dim = (self.intent_embedding_dim * 2 + self.category_embedding_dim + self.subCategory_embedding_dim) // self.head_num
 
         
-        if self.dataset in ['mind']:  
+        if self.dataset in ['mind']:
             # for MIND
-            self.train_root = '../MIND-small/train'
-            self.dev_root = '../MIND-small/dev'
-            self.test_root = '../MIND-small/test'
+            mind_root = '../MIND-small' if self.mind_size == 'small' else '../MIND-large'
+            self.train_root = mind_root + '/train'
+            self.dev_root = mind_root + '/dev'
+            self.test_root = mind_root + '/test'
             self.max_history_num = 50
         elif self.dataset in ['adressa']:
             # for Adressa
@@ -98,6 +216,8 @@ class Config:
             self.dev_root = '../.Adressa-lifetimev3/dev'
             self.test_root = '../Adressa-lifetimev3/test'
             self.max_history_num = 50
+
+        self.dataset_tag = ('mind-' + self.mind_size) if self.dataset == 'mind' else self.dataset
 
         if self.dataset in ['mind']:
             self.gcn_layer_num = 5
@@ -120,6 +240,7 @@ class Config:
             self.epoch = 16
 
         self.seed = self.seed if self.seed >= 0 else (int)(time.time())
+        assert self.num_runs >= 1, '--num_runs must be at least 1'
         self.attribute_dict['dropout_rate'] = self.dropout_rate
         self.attribute_dict['gcn_layer_num'] = self.gcn_layer_num
         self.attribute_dict['epoch'] = self.epoch
@@ -140,6 +261,15 @@ class Config:
                             self.attribute_dict[attribute] = configs[attribute]
             else:
                 raise Exception('Config file does not exist : ' + self.config_file)
+        assert self.repeat_negative_weight > 0, '--repeat_negative_weight must be positive'
+        assert self.repeat_negative_sampling_boost > 0, '--repeat_negative_sampling_boost must be positive'
+        assert self.repeat_positive_weight > 0, '--repeat_positive_weight must be positive'
+        assert self.run_length_weight_alpha >= 0, '--run_length_weight_alpha must be non-negative'
+        assert self.run_length_weight_beta >= 0, '--run_length_weight_beta must be non-negative'
+        assert self.run_length_weight_cap >= 1.0, '--run_length_weight_cap must be at least 1.0'
+        assert self.positive_run_length_weight_alpha >= 0, '--positive_run_length_weight_alpha must be non-negative'
+        assert self.positive_run_length_weight_beta >= 0, '--positive_run_length_weight_beta must be non-negative'
+        assert self.positive_run_length_weight_cap >= 1.0, '--positive_run_length_weight_cap must be at least 1.0'
         assert not (self.no_self_connection and not self.no_adjacent_normalization), 'Adjacent normalization of graph only can be set in case of self-connection'
         print('*' * 32 + ' Experiment setting ' + '*' * 32)
         for attribute in self.attribute_dict:
@@ -179,18 +309,23 @@ class Config:
             if self.dataset in ['adressa']:
                 preprocess_Adressa()
             else:
-                prepare_function = getattr(self, 'prepare_MIND_%s' % self.dataset, None)
-                if prepare_function:
-                    prepare_function()
+                if self.mind_size == 'small':
+                    prepare_MIND_small()
+                else:
+                    prepare_MIND_large()
+                # prepare_function = getattr(self, 'prepare_MIND_%s' % self.dataset, None)
+                # if prepare_function:
+                #     print("prepare function 실행")
+                #     prepare_function()
 
         model_name = self.news_encoder + '-' + self.user_encoder
         mkdirs = lambda x: os.makedirs(x) if not os.path.exists(x) else None
-        self.config_dir = 'configs/' + self.dataset + '/' + model_name
-        self.model_dir = 'models/' + self.dataset + '/' + model_name
-        self.best_model_dir = 'best_model/' + self.dataset + '/' + model_name
-        self.dev_res_dir = 'dev/res/' + self.dataset + '/' + model_name
-        self.test_res_dir = 'test/res/' + self.dataset + '/' + model_name
-        self.result_dir = 'results/' + self.dataset + '/' + model_name
+        self.config_dir = 'configs/' + self.dataset_tag + '/' + model_name
+        self.model_dir = 'models/' + self.dataset_tag + '/' + model_name
+        self.best_model_dir = 'best_model/' + self.dataset_tag + '/' + model_name
+        self.dev_res_dir = 'dev/res/' + self.dataset_tag + '/' + model_name
+        self.test_res_dir = 'test/res/' + self.dataset_tag + '/' + model_name
+        self.result_dir = 'results/' + self.dataset_tag + '/' + model_name
         mkdirs(self.config_dir)
         mkdirs(self.model_dir)
         mkdirs(self.best_model_dir)
@@ -199,23 +334,25 @@ class Config:
         mkdirs('test/ref')
         mkdirs(self.test_res_dir)
         mkdirs(self.result_dir)
-        if not os.path.exists('dev/ref/truth-%s.txt' % self.dataset):
+        if not os.path.exists('dev/ref/truth-%s.txt' % self.dataset_tag):
             with open(os.path.join(self.dev_root, 'behaviors.tsv'), 'r', encoding='utf-8') as dev_f:
-                with open('dev/ref/truth-%s.txt' % self.dataset, 'w', encoding='utf-8') as truth_f:
+                with open('dev/ref/truth-%s.txt' % self.dataset_tag, 'w', encoding='utf-8') as truth_f:
                     for dev_ID, line in enumerate(dev_f):
-                        impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                        impression_ID, user_ID, time, history, impressions = line.split('\t')
+                        # impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
                         labels = [int(impression[-1]) for impression in impressions.strip().split(' ')]
                         truth_f.write(('' if dev_ID == 0 else '\n') + str(dev_ID + 1) + ' ' + str(labels).replace(' ', ''))
-        if self.dataset != 'large':
-            if not os.path.exists('test/ref/truth-%s.txt' % self.dataset):
+        if not (self.dataset == 'mind' and self.mind_size == 'large'):
+            if not os.path.exists('test/ref/truth-%s.txt' % self.dataset_tag):
                 with open(os.path.join(self.test_root, 'behaviors.tsv'), 'r', encoding='utf-8') as test_f:
-                    with open('test/ref/truth-%s.txt' % self.dataset, 'w', encoding='utf-8') as truth_f:
+                    with open('test/ref/truth-%s.txt' % self.dataset_tag, 'w', encoding='utf-8') as truth_f:
                         for test_ID, line in enumerate(test_f):
-                            impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                            impression_ID, user_ID, time, history, impressions = line.split('\t')
+                            # impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
                             labels = [int(impression[-1]) for impression in impressions.strip().split(' ')]
                             truth_f.write(('' if test_ID == 0 else '\n') + str(test_ID + 1) + ' ' + str(labels).replace(' ', ''))
         else:
-            self.prediction_dir = 'prediction/large/' + model_name
+            self.prediction_dir = 'prediction/' + self.dataset_tag + '/' + model_name
             mkdirs(self.prediction_dir)
 
 

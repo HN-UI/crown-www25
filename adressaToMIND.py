@@ -1,3 +1,4 @@
+# Adressa 데이터 MIND 형식으로 바꾸기
 import json
 import pickle
 import argparse

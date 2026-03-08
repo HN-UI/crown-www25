@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from torch.nn.utils.rnn import pack_padded_sequence
 from torch.nn.utils.rnn import pad_packed_sequence
-from fastformer import FastformerEncoder
+# from fastformer import FastformerEncoder
 from transformers import RobertaConfig, RobertaModel, RobertaPreTrainedModel
 from layers import Conv1D, Conv2D_Pool, MultiHeadAttention, Attention, ScaledDotProduct_CandidateAttention, CandidateAttention, ScaledDotProduct_Attention
 

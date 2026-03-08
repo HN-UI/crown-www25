@@ -27,7 +27,7 @@ class Trainer:
         self.loss = self.negative_log_softmax if config.click_predictor in ['dot_product', 'mlp', 'FIM'] else self.negative_log_sigmoid
         self.optimizer = optim.Adam(filter(lambda p: p.requires_grad, self.model.parameters()), lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.5, patience=3, verbose=True)
-        self._dataset = config.dataset
+        self._dataset = getattr(config, 'dataset_tag', config.dataset)
         self._corpus = corpus
         self.train_dataset = Train_Dataset(corpus)
         self.run_index = run_index
@@ -43,7 +43,7 @@ class Trainer:
             os.mkdir(self.dev_res_dir)
         with open(config.config_dir + '/#' + str(self.run_index) + '.json', 'w', encoding='utf-8') as f:
             json.dump(config.attribute_dict, f)
-        if self._dataset == 'large':
+        if self._dataset in ['large', 'mind-large']:
             self.prediction_dir = config.prediction_dir + '/#' + str(self.run_index)
             os.mkdir(self.prediction_dir)
         self.dev_criterion = config.dev_criterion
@@ -63,14 +63,36 @@ class Trainer:
         self.model.cuda()
         print('Running : ' + self.model.model_name + '\t#' + str(self.run_index))
 
-    def negative_log_softmax(self, logits):
-        loss = (-torch.log_softmax(logits, dim=1).select(dim=1, index=0)).mean()
-        return loss
+    def negative_log_softmax(self, logits, positive_weights=None, negative_weights=None):
+        if negative_weights is None:
+            adjusted_logits = logits
+        else:
+            adjusted_logits = logits.clone()
+            adjusted_logits[:, 1:] = adjusted_logits[:, 1:] + torch.log(torch.clamp(negative_weights, min=1e-15))
+        positive_loss = -torch.log_softmax(adjusted_logits, dim=1).select(dim=1, index=0)
+        if positive_weights is None:
+            return positive_loss.mean()
+        return (positive_loss * positive_weights).sum() / torch.clamp(positive_weights.sum(), min=1.0)
 
-    def negative_log_sigmoid(self, logits):
+    def negative_log_sigmoid(self, logits, positive_weights=None, negative_weights=None):
         positive_sigmoid = torch.clamp(torch.sigmoid(logits[:, 0]), min=1e-15, max=1)
+        positive_log = torch.log(positive_sigmoid)
         negative_sigmoid = torch.clamp(torch.sigmoid(-logits[:, 1:]), min=1e-15, max=1)
-        loss = -(torch.log(positive_sigmoid).sum() + torch.log(negative_sigmoid).sum()) / logits.numel()
+        negative_log = torch.log(negative_sigmoid)
+        if positive_weights is None:
+            positive_term = positive_log.sum()
+            positive_normalizer = torch.tensor(float(logits.size(0)), device=logits.device, dtype=logits.dtype)
+        else:
+            positive_term = (positive_log * positive_weights).sum()
+            positive_normalizer = positive_weights.sum()
+        if negative_weights is None:
+            negative_term = negative_log.sum()
+            negative_normalizer = torch.tensor(float(logits.size(0) * logits.size(1) - logits.size(0)), device=logits.device, dtype=logits.dtype)
+        else:
+            negative_term = (negative_log * negative_weights).sum()
+            negative_normalizer = negative_weights.sum()
+        normalizer = positive_normalizer + negative_normalizer
+        loss = -(positive_term + negative_term) / torch.clamp(normalizer, min=1.0)
         return loss
 
     def train(self):
@@ -81,7 +103,7 @@ class Trainer:
             model.train()
             epoch_loss = 0
             for (user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
-                news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity) in train_dataloader:
+                news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity, positive_weights, negative_weights) in train_dataloader:
                 user_ID = user_ID.cuda(non_blocking=True)                                                                                                                       # [batch_size]
                 user_category = user_category.cuda(non_blocking=True)                                                                                                           # [batch_size, max_history_num]
                 user_subCategory = user_subCategory.cuda(non_blocking=True)                                                                                                     # [batch_size, max_history_num]
@@ -103,11 +125,13 @@ class Trainer:
                 news_content_text = news_content_text.cuda(non_blocking=True)                                                                                                   # [batch_size, 1 + negative_sample_num, max_content_length]
                 news_content_mask = news_content_mask.cuda(non_blocking=True)                                                                                                   # [batch_size, 1 + negative_sample_num, max_content_length]
                 news_content_entity = news_content_entity.cuda(non_blocking=True)                                                                                               # [batch_size, 1 + negative_sample_num, max_content_length]
+                positive_weights = positive_weights.cuda(non_blocking=True).float()                                                                                             # [batch_size]
+                negative_weights = negative_weights.cuda(non_blocking=True).float()                                                                                             # [batch_size, negative_sample_num]
 
                 logits = model(user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
                                news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity) # [batch_size, 1 + negative_sample_num]
                 
-                loss = self.loss(logits)
+                loss = self.loss(logits, positive_weights, negative_weights)
                 if model.news_encoder.auxiliary_loss is not None:
                     news_auxiliary_loss = model.news_encoder.auxiliary_loss.mean()
                     loss += news_auxiliary_loss
@@ -206,14 +230,36 @@ class Trainer:
         print('nDCG@10 : %.4f' % self.ndcg10_results[self.best_dev_epoch - 1])
 
 
-def negative_log_softmax(logits):
-    loss = (-torch.log_softmax(logits, dim=1).select(dim=1, index=0)).mean()
-    return loss
+def negative_log_softmax(logits, positive_weights=None, negative_weights=None):
+    if negative_weights is None:
+        adjusted_logits = logits
+    else:
+        adjusted_logits = logits.clone()
+        adjusted_logits[:, 1:] = adjusted_logits[:, 1:] + torch.log(torch.clamp(negative_weights, min=1e-15))
+    positive_loss = -torch.log_softmax(adjusted_logits, dim=1).select(dim=1, index=0)
+    if positive_weights is None:
+        return positive_loss.mean()
+    return (positive_loss * positive_weights).sum() / torch.clamp(positive_weights.sum(), min=1.0)
 
-def negative_log_sigmoid(logits):
+def negative_log_sigmoid(logits, positive_weights=None, negative_weights=None):
     positive_sigmoid = torch.clamp(torch.sigmoid(logits[:, 0]), min=1e-15, max=1)
+    positive_log = torch.log(positive_sigmoid)
     negative_sigmoid = torch.clamp(torch.sigmoid(-logits[:, 1:]), min=1e-15, max=1)
-    loss = -(torch.log(positive_sigmoid).sum() + torch.log(negative_sigmoid).sum()) / logits.numel()
+    negative_log = torch.log(negative_sigmoid)
+    if positive_weights is None:
+        positive_term = positive_log.sum()
+        positive_normalizer = torch.tensor(float(logits.size(0)), device=logits.device, dtype=logits.dtype)
+    else:
+        positive_term = (positive_log * positive_weights).sum()
+        positive_normalizer = positive_weights.sum()
+    if negative_weights is None:
+        negative_term = negative_log.sum()
+        negative_normalizer = torch.tensor(float(logits.size(0) * logits.size(1) - logits.size(0)), device=logits.device, dtype=logits.dtype)
+    else:
+        negative_term = (negative_log * negative_weights).sum()
+        negative_normalizer = negative_weights.sum()
+    normalizer = positive_normalizer + negative_normalizer
+    loss = -(positive_term + negative_term) / torch.clamp(normalizer, min=1.0)
     return loss
 
 def distributed_train(rank, model: nn.Module, config: Config, corpus: Corpus, run_index: int):
@@ -243,7 +289,7 @@ def distributed_train(rank, model: nn.Module, config: Config, corpus: Corpus, ru
             os.mkdir(dev_res_dir)
         with open(config.config_dir + '/#' + str(run_index) + '.json', 'w', encoding='utf-8') as f:
             json.dump(config.attribute_dict, f)
-        if config.dataset == 'large':
+        if getattr(config, 'dataset_tag', config.dataset) in ['large', 'mind-large']:
             prediction_dir = config.prediction_dir + '/#' + str(run_index)
             os.mkdir(prediction_dir)
         dev_criterion = config.dev_criterion
@@ -269,7 +315,7 @@ def distributed_train(rank, model: nn.Module, config: Config, corpus: Corpus, ru
         model.train()
         epoch_loss = 0
         for (user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
-            news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity) in train_dataloader:
+            news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity, positive_weights, negative_weights) in train_dataloader:
             user_ID = user_ID.cuda(non_blocking=True)                                                                                                                       # [batch_size]
             user_category = user_category.cuda(non_blocking=True)                                                                                                           # [batch_size, max_history_num]
             user_subCategory = user_subCategory.cuda(non_blocking=True)                                                                                                     # [batch_size, max_history_num]
@@ -291,11 +337,13 @@ def distributed_train(rank, model: nn.Module, config: Config, corpus: Corpus, ru
             news_content_text = news_content_text.cuda(non_blocking=True)                                                                                                   # [batch_size, 1 + negative_sample_num, max_content_length]
             news_content_mask = news_content_mask.cuda(non_blocking=True)                                                                                                   # [batch_size, 1 + negative_sample_num, max_content_length]
             news_content_entity = news_content_entity.cuda(non_blocking=True)                                                                                               # [batch_size, 1 + negative_sample_num, max_content_length]
+            positive_weights = positive_weights.cuda(non_blocking=True).float()                                                                                             # [batch_size]
+            negative_weights = negative_weights.cuda(non_blocking=True).float()                                                                                             # [batch_size, negative_sample_num]
 
             logits = model(user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
                            news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity) # [batch_size, 1 + negative_sample_num]
 
-            loss = loss_(logits)
+            loss = loss_(logits, positive_weights, negative_weights)
             if model.module.news_encoder.auxiliary_loss is not None:
                 news_auxiliary_loss = model.module.news_encoder.auxiliary_loss.mean()
                 loss += news_auxiliary_loss
@@ -313,7 +361,7 @@ def distributed_train(rank, model: nn.Module, config: Config, corpus: Corpus, ru
 
         # dev
         if rank == 0:
-            auc, mrr, ndcg5, ndcg10 = compute_scores(model.module, corpus, batch_size * 3 // 2, 'dev', dev_res_dir + '/' + model_name + '-' + str(e) + '.txt', config.dataset)
+            auc, mrr, ndcg5, ndcg10 = compute_scores(model.module, corpus, batch_size * 3 // 2, 'dev', dev_res_dir + '/' + model_name + '-' + str(e) + '.txt', getattr(config, 'dataset_tag', config.dataset))
             auc_results.append(auc)
             mrr_results.append(mrr)
             ndcg5_results.append(ndcg5)
@@ -386,7 +434,7 @@ def distributed_train(rank, model: nn.Module, config: Config, corpus: Corpus, ru
         dist.barrier()
 
     if rank == 0:
-        with open('%s/%s-%s-dev_log.txt' % (dev_res_dir, model_name, config.dataset), 'w', encoding='utf-8') as f:
+        with open('%s/%s-%s-dev_log.txt' % (dev_res_dir, model_name, getattr(config, 'dataset_tag', config.dataset)), 'w', encoding='utf-8') as f:
             f.write('Epoch\tAUC\tMRR\tnDCG@5\tnDCG@10\n')
             for i in range(len(auc_results)):
                 f.write('%d\t%.4f\t%.4f\t%.4f\t%.4f\n' % (i + 1, auc_results[i], mrr_results[i], ndcg5_results[i], ndcg10_results[i]))

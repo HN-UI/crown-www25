@@ -4,6 +4,7 @@ import pickle
 import gzip
 import collections
 import re
+from datetime import datetime
 from nltk.tokenize import word_tokenize
 # import torchtext
 # torchtext.disable_torchtext_deprecation_warning()
@@ -23,22 +24,23 @@ pat = re.compile(r"[\w]+|[.,!?;|]")
 class Corpus:
     @staticmethod
     def preprocess(config: Config):
-        user_ID_file = 'user_ID-%s.json' % config.dataset
-        news_ID_file = 'news_ID-%s.json' % config.dataset
-        category_file = 'category-%s.json' % config.dataset
-        subCategory_file = 'subCategory-%s.json' % config.dataset
-        vocabulary_file = 'vocabulary-' + str(config.word_threshold) + '-' + config.tokenizer + '-' + str(config.max_title_length) + '-' + str(config.max_abstract_length) + '-' + config.dataset + '.json'
-        word_embedding_file = 'word_embedding-' + str(config.word_threshold) + '-' + str(config.word_embedding_dim) + '-' + config.tokenizer + '-' + str(config.max_title_length) + '-' + str(config.max_abstract_length) + '-' + config.dataset + '.pkl'
-        user_history_graph_file_raw = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + config.dataset + '.pkl'+'.gz'
-        user_history_graph_file_train = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + config.dataset + '_train.pkl'+'.gz'
-        user_history_graph_file_test = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + config.dataset + '_test.pkl'+'.gz'
-        user_history_graph_file_dev = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + config.dataset + '_dev.pkl'+'.gz'
+        dataset_tag = getattr(config, 'dataset_tag', config.dataset)
+        user_ID_file = 'user_ID-%s.json' % dataset_tag
+        news_ID_file = 'news_ID-%s.json' % dataset_tag
+        category_file = 'category-%s.json' % dataset_tag
+        subCategory_file = 'subCategory-%s.json' % dataset_tag
+        vocabulary_file = 'vocabulary-' + str(config.word_threshold) + '-' + config.tokenizer + '-' + str(config.max_title_length) + '-' + str(config.max_abstract_length) + '-' + dataset_tag + '.json'
+        word_embedding_file = 'word_embedding-' + str(config.word_threshold) + '-' + str(config.word_embedding_dim) + '-' + config.tokenizer + '-' + str(config.max_title_length) + '-' + str(config.max_abstract_length) + '-' + dataset_tag + '.pkl'
+        user_history_graph_file_raw = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + dataset_tag + '.pkl'+'.gz'
+        user_history_graph_file_train = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + dataset_tag + '_train.pkl'+'.gz'
+        user_history_graph_file_test = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + dataset_tag + '_test.pkl'+'.gz'
+        user_history_graph_file_dev = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + dataset_tag + '_dev.pkl'+'.gz'
         
         if config.dataset in ['mind']:
             # for MIND
-            entity_file = 'entity-%s.json' % config.dataset
-            entity_embedding_file = 'entity_embedding-%s.pkl' % config.dataset
-            context_embedding_file = 'context_embedding-%s.pkl' % config.dataset
+            entity_file = 'entity-%s.json' % dataset_tag
+            entity_embedding_file = 'entity_embedding-%s.pkl' % dataset_tag
+            context_embedding_file = 'context_embedding-%s.pkl' % dataset_tag
             preprocessed_data_files = [user_ID_file, news_ID_file, category_file, subCategory_file, vocabulary_file, word_embedding_file, entity_file, entity_embedding_file, context_embedding_file, user_history_graph_file_train, user_history_graph_file_test, user_history_graph_file_dev]
         else:
             # for Adressa (not include entity_file, entity_embedding_file, context_embedding_file)
@@ -57,7 +59,8 @@ class Corpus:
             # 1. user ID dictionay
             with open(os.path.join(config.train_root, 'behaviors.tsv'), 'r', encoding='utf-8') as train_behaviors_f:
                 for line in train_behaviors_f:
-                    impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                    #impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                    impression_ID, user_ID, time, history, impressions = line.split('\t')
                     if user_ID not in user_ID_dict:
                         user_ID_dict[user_ID] = len(user_ID_dict)
                 with open(user_ID_file, 'w', encoding='utf-8') as user_ID_f:
@@ -229,7 +232,8 @@ class Corpus:
                 with open(os.path.join(prefix, 'behaviors.tsv'), 'r', encoding='utf-8') as behaviors_f:
                     user_history_graph_data = {}
                     for line_index, line in enumerate(behaviors_f):
-                        impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                        # impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                        impression_ID, user_ID, time, history, impressions = line.split('\t')
                         if config.no_self_connection:
                             history_graph = np.zeros([graph_size, graph_size], dtype=np.float32)
                         else:
@@ -276,29 +280,30 @@ class Corpus:
                 print(f'{mode}-completed: ', len(user_history_graph_data))
 
     def __init__(self, config: Config):
-        user_history_graph_file_train = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + config.dataset + '_train.pkl'+'.gz'
-        user_history_graph_file_dev = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + config.dataset + '_dev.pkl'+'.gz'
-        user_history_graph_file_test = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + config.dataset + '_test.pkl'+'.gz'
+        dataset_tag = getattr(config, 'dataset_tag', config.dataset)
+        user_history_graph_file_train = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + dataset_tag + '_train.pkl'+'.gz'
+        user_history_graph_file_dev = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + dataset_tag + '_dev.pkl'+'.gz'
+        user_history_graph_file_test = 'user_history_graph-' + str(config.max_history_num) + ('' if config.no_self_connection else '-self') + ('' if config.no_adjacent_normalization else '-normalize-' + config.gcn_normalization_type) + '-' + dataset_tag + '_test.pkl'+'.gz'
         
         # preprocess data
         Corpus.preprocess(config)
-        with open('user_ID-%s.json' % config.dataset, 'r', encoding='utf-8') as user_ID_f:
+        with open('user_ID-%s.json' % dataset_tag, 'r', encoding='utf-8') as user_ID_f:
             self.user_ID_dict = json.load(user_ID_f)
             config.user_num = len(self.user_ID_dict)
-        with open('news_ID-%s.json' % config.dataset, 'r', encoding='utf-8') as news_ID_f:
+        with open('news_ID-%s.json' % dataset_tag, 'r', encoding='utf-8') as news_ID_f:
             self.news_ID_dict = json.load(news_ID_f)
             self.news_num = len(self.news_ID_dict)
-        with open('category-%s.json' % config.dataset, 'r', encoding='utf-8') as category_f:
+        with open('category-%s.json' % dataset_tag, 'r', encoding='utf-8') as category_f:
             self.category_dict = json.load(category_f)
             config.category_num = len(self.category_dict)
-        with open('subCategory-%s.json' % config.dataset, 'r', encoding='utf-8') as subCategory_f:
+        with open('subCategory-%s.json' % dataset_tag, 'r', encoding='utf-8') as subCategory_f:
             self.subCategory_dict = json.load(subCategory_f)
             config.subCategory_num = len(self.subCategory_dict)
-        with open('vocabulary-' + str(config.word_threshold) + '-' + config.tokenizer + '-' + str(config.max_title_length) + '-' + str(config.max_abstract_length) + '-' + config.dataset + '.json', 'r', encoding='utf-8') as vocabulary_f:
+        with open('vocabulary-' + str(config.word_threshold) + '-' + config.tokenizer + '-' + str(config.max_title_length) + '-' + str(config.max_abstract_length) + '-' + dataset_tag + '.json', 'r', encoding='utf-8') as vocabulary_f:
             self.word_dict = json.load(vocabulary_f)
             config.vocabulary_size = len(self.word_dict)
         if config.dataset in ['mind']:
-            with open('entity-%s.json' % config.dataset, 'r', encoding='utf-8') as entity_f:
+            with open('entity-%s.json' % dataset_tag, 'r', encoding='utf-8') as entity_f:
                 self.entity_dict = json.load(entity_f)
                 config.entity_size = len(self.entity_dict)
         with gzip.open(user_history_graph_file_train, 'rb') as user_history_graph_f_train, \
@@ -320,6 +325,20 @@ class Corpus:
 
         # meta data
         self.negative_sample_num = config.negative_sample_num                                           # negative sample number for training
+        self.drop_repeated_positive_clicks = config.drop_repeated_positive_clicks                       # drop repeated positive clicks for each user
+        self.drop_prev_clicked_from_negatives = config.drop_prev_clicked_from_negatives                 # drop previously clicked news from current negative candidates
+        self.drop_prev_nonclicked_from_negatives = config.drop_prev_nonclicked_from_negatives           # drop previously non-clicked news from current negative candidates
+        self.repeat_negative_weight = config.repeat_negative_weight                                      # extra loss weight for repeated 0->0 negatives
+        self.repeat_negative_sampling_boost = config.repeat_negative_sampling_boost                      # sampling boost for repeated 0->0 negatives
+        self.repeat_positive_weight = config.repeat_positive_weight                                      # extra loss weight for repeated 1->1 positives
+        self.use_run_length_negative_weight = config.use_run_length_negative_weight                      # enable run-length based weight for repeated 0->0 negatives
+        self.use_run_length_positive_weight = config.use_run_length_positive_weight                      # enable run-length based weight for repeated 1->1 positives
+        self.run_length_weight_alpha = config.run_length_weight_alpha                                    # alpha in run-length weight schedule
+        self.run_length_weight_beta = config.run_length_weight_beta                                      # beta in run-length weight schedule
+        self.run_length_weight_cap = config.run_length_weight_cap                                        # cap in run-length weight schedule
+        self.positive_run_length_weight_alpha = config.positive_run_length_weight_alpha                  # alpha in positive run-length weight schedule
+        self.positive_run_length_weight_beta = config.positive_run_length_weight_beta                    # beta in positive run-length weight schedule
+        self.positive_run_length_weight_cap = config.positive_run_length_weight_cap                      # cap in positive run-length weight schedule
         self.max_history_num = config.max_history_num                                                   # max history number for each training user
         self.max_title_length = config.max_title_length                                                 # max title length for each news text
         self.max_abstract_length = config.max_abstract_length                                           # max abstract length for each news text
@@ -336,6 +355,10 @@ class Corpus:
         self.dev_indices = []                                                                           # index for dev
         self.test_behaviors = []                                                                        # [user_ID, [history], [history_mask], candidate_news_ID, behavior_index]
         self.test_indices = []                                                                          # index for test
+        self.test_prev_positive_reclicked_flags = []                                                    # [sample_num], candidate was clicked(-1) in earlier test impressions of same user
+        self.test_prev_positive_to_negative_flags = []                                                  # [sample_num], candidate was clicked(-1) before and now labeled -0
+        self.test_prev_negative_to_negative_flags = []                                                  # [sample_num], candidate was non-clicked(-0) before and now labeled -0
+        self.test_prev_negative_to_positive_flags = []                                                  # [sample_num], candidate was non-clicked(-0) before and now labeled -1
         self.title_word_num = 0
         self.abstract_word_num = 0
 
@@ -420,16 +443,40 @@ class Corpus:
         self.news_abstract_mask[0][0] = 1 # for <PAD> news
 
         # generate behavior meta data
+        # 중요: train behaviors는 파일 행 순서가 아닌 user별 time 순서로 처리해서
+        # 과거 클릭 이력 기반 로직이 미래 정보를 보지 않도록 한다.
+        user_records = collections.defaultdict(list)
+        time_parse_failed = 0
+        time_format = '%m/%d/%Y %I:%M:%S %p'
         with open(os.path.join(config.train_root, 'behaviors.tsv'), 'r', encoding='utf-8') as train_behaviors_f:
             for behavior_index, line in enumerate(train_behaviors_f):
-                impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                #impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                impression_ID, user_ID, time, history, impressions = line.split('\t')
+                try:
+                    behavior_time = datetime.strptime(time, time_format)
+                except ValueError:
+                    behavior_time = None
+                    time_parse_failed += 1
+                user_records[user_ID].append((behavior_index, behavior_time, history, impressions))
+
+        promoted_negative_to_positive = 0
+        for user_ID, records in user_records.items():
+            # time 파싱 실패 레코드는 뒤로 보내고, 동시간대는 원래 behavior_index 순서 사용
+            records.sort(key=lambda x: (x[1] is None, x[1] if x[1] is not None else datetime.min, x[0]))
+            user_clicked_history = set()
+            for behavior_index, behavior_time, history, impressions in records:
                 click_impressions = []
                 non_click_impressions = []
                 for impression in impressions.strip().split(' '):
+                    news_id = self.news_ID_dict[impression[:-2]]
                     if impression[-2:] == '-1':
-                        click_impressions.append(self.news_ID_dict[impression[:-2]])
+                        click_impressions.append(news_id)
                     else:
-                        non_click_impressions.append(self.news_ID_dict[impression[:-2]])
+                        if config.promote_reclicked_negatives_to_positive and news_id in user_clicked_history:
+                            click_impressions.append(news_id)
+                            promoted_negative_to_positive += 1
+                        else:
+                            non_click_impressions.append(news_id)
                 if len(history) != 0:
                     history = list(map(lambda x: self.news_ID_dict[x], history.strip().split(' ')))
                     padding_num = max(0, self.max_history_num - len(history))
@@ -441,9 +488,17 @@ class Corpus:
                 else:
                     for click_impression in click_impressions:
                         self.train_behaviors.append([self.user_ID_dict[user_ID], [0 for _ in range(self.max_history_num)], np.zeros([self.max_history_num], dtype=bool), click_impression, non_click_impressions, behavior_index])
+                # 현재 impression의 positive(원래 -1 + 승격된 항목)를 이후 이력으로 반영
+                if len(click_impressions) > 0:
+                    user_clicked_history.update(click_impressions)
+        if time_parse_failed > 0:
+            print('Warning: failed to parse train behavior time entries : %d' % time_parse_failed)
+        if config.promote_reclicked_negatives_to_positive:
+            print('Promoted reclicked negatives to positive in train set : %d' % promoted_negative_to_positive)
         with open(os.path.join(config.dev_root, 'behaviors.tsv'), 'r', encoding='utf-8') as dev_behaviors_f:
             for dev_ID, line in enumerate(dev_behaviors_f):
-                impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                #impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                impression_ID, user_ID, time, history, impressions = line.split('\t')
                 if len(history) != 0:
                     history = list(map(lambda x: self.news_ID_dict[x], history.strip().split(' ')))
                     padding_num = max(0, self.max_history_num - len(history))
@@ -458,8 +513,15 @@ class Corpus:
                         self.dev_indices.append(dev_ID)
                         self.dev_behaviors.append([self.user_ID_dict[user_ID] if user_ID in self.user_ID_dict else 0, [0 for _ in range(self.max_history_num)], np.zeros([self.max_history_num], dtype=bool), self.news_ID_dict[impression[:-2]], dev_ID])
         with open(os.path.join(config.test_root, 'behaviors.tsv'), 'r', encoding='utf-8') as test_behaviors_f:
+            test_user_clicked_history = collections.defaultdict(set)
+            test_user_nonclicked_history = collections.defaultdict(set)
             for test_ID, line in enumerate(test_behaviors_f):
-                impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                #impression_ID, user_ID, time, history, impressions, user_topic_lifetime = line.split('\t')
+                impression_ID, user_ID, time, history, impressions = line.split('\t')
+                prior_clicked = test_user_clicked_history[user_ID]
+                prior_nonclicked = test_user_nonclicked_history[user_ID]
+                current_positive_clicked = []
+                current_nonclicked = []
                 if len(history) != 0:
                     history = list(map(lambda x: self.news_ID_dict[x], history.strip().split(' ')))
                     padding_num = max(0, self.max_history_num - len(history))
@@ -468,14 +530,50 @@ class Corpus:
                     user_history_mask[:min(len(history), self.max_history_num)] = 1
                     for impression in impressions.strip().split(' '):
                         self.test_indices.append(test_ID)
-                        if config.dataset != 'large':
-                            self.test_behaviors.append([self.user_ID_dict[user_ID] if user_ID in self.user_ID_dict else 0, user_history, user_history_mask, self.news_ID_dict[impression[:-2]], test_ID])
+                        if not (config.dataset == 'mind' and getattr(config, 'mind_size', 'small') == 'large'):
+                            candidate_news_id = self.news_ID_dict[impression[:-2]]
+                            self.test_behaviors.append([self.user_ID_dict[user_ID] if user_ID in self.user_ID_dict else 0, user_history, user_history_mask, candidate_news_id, test_ID])
+                            is_current_positive = impression[-2:] == '-1'
+                            self.test_prev_positive_reclicked_flags.append(int((candidate_news_id in prior_clicked) and is_current_positive))
+                            self.test_prev_positive_to_negative_flags.append(int((candidate_news_id in prior_clicked) and (not is_current_positive)))
+                            self.test_prev_negative_to_negative_flags.append(int((candidate_news_id in prior_nonclicked) and (not is_current_positive)))
+                            self.test_prev_negative_to_positive_flags.append(int((candidate_news_id in prior_nonclicked) and is_current_positive))
+                            if is_current_positive:
+                                current_positive_clicked.append(candidate_news_id)
+                            else:
+                                current_nonclicked.append(candidate_news_id)
                         else:
                             self.test_behaviors.append([self.user_ID_dict[user_ID] if user_ID in self.user_ID_dict else 0, user_history, user_history_mask, self.news_ID_dict[impression], test_ID])
+                            self.test_prev_positive_reclicked_flags.append(0)
+                            self.test_prev_positive_to_negative_flags.append(0)
+                            self.test_prev_negative_to_negative_flags.append(0)
+                            self.test_prev_negative_to_positive_flags.append(0)
                 else:
                     for impression in impressions.strip().split(' '):
                         self.test_indices.append(test_ID)
-                        if config.dataset != 'large':
-                            self.test_behaviors.append([self.user_ID_dict[user_ID] if user_ID in self.user_ID_dict else 0, [0 for _ in range(self.max_history_num)], np.zeros([self.max_history_num], dtype=bool), self.news_ID_dict[impression[:-2]], test_ID])
+                        if not (config.dataset == 'mind' and getattr(config, 'mind_size', 'small') == 'large'):
+                            candidate_news_id = self.news_ID_dict[impression[:-2]]
+                            self.test_behaviors.append([self.user_ID_dict[user_ID] if user_ID in self.user_ID_dict else 0, [0 for _ in range(self.max_history_num)], np.zeros([self.max_history_num], dtype=bool), candidate_news_id, test_ID])
+                            is_current_positive = impression[-2:] == '-1'
+                            self.test_prev_positive_reclicked_flags.append(int((candidate_news_id in prior_clicked) and is_current_positive))
+                            self.test_prev_positive_to_negative_flags.append(int((candidate_news_id in prior_clicked) and (not is_current_positive)))
+                            self.test_prev_negative_to_negative_flags.append(int((candidate_news_id in prior_nonclicked) and (not is_current_positive)))
+                            self.test_prev_negative_to_positive_flags.append(int((candidate_news_id in prior_nonclicked) and is_current_positive))
+                            if is_current_positive:
+                                current_positive_clicked.append(candidate_news_id)
+                            else:
+                                current_nonclicked.append(candidate_news_id)
                         else:
                             self.test_behaviors.append([self.user_ID_dict[user_ID] if user_ID in self.user_ID_dict else 0, [0 for _ in range(self.max_history_num)], np.zeros([self.max_history_num], dtype=bool), self.news_ID_dict[impression], test_ID])
+                            self.test_prev_positive_reclicked_flags.append(0)
+                            self.test_prev_positive_to_negative_flags.append(0)
+                            self.test_prev_negative_to_negative_flags.append(0)
+                            self.test_prev_negative_to_positive_flags.append(0)
+                if len(current_positive_clicked) > 0:
+                    prior_clicked.update(current_positive_clicked)
+                if len(current_nonclicked) > 0:
+                    prior_nonclicked.update(current_nonclicked)
+        assert len(self.test_prev_positive_reclicked_flags) == len(self.test_behaviors), 'test reclick flags size mismatch'
+        assert len(self.test_prev_positive_to_negative_flags) == len(self.test_behaviors), 'test 1->0 flags size mismatch'
+        assert len(self.test_prev_negative_to_negative_flags) == len(self.test_behaviors), 'test 0->0 flags size mismatch'
+        assert len(self.test_prev_negative_to_positive_flags) == len(self.test_behaviors), 'test 0->1 flags size mismatch'
