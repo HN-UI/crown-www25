@@ -1,0 +1,6 @@
+weight=0.4
+script_tag=run_pairwise_0
+gpu_id=1
+failed_at=2026-03-23 11:07:23
+status=137
+log_file=logs/run_pairwise_0_NAML_ATT_PAIRWISE_log_sigmoid_0.4.log

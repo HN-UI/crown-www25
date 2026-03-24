@@ -28,7 +28,16 @@ sklearn
 ## How to run
 ```
 python main.py --news_encoder=CROWN --user_encoder=CROWN
+python main.py --news_encoder=NAML --user_encoder=ATT --num_runs=5 --output-name custom_metrics.tsv
 ```
+The second command writes aggregate files such as `custom_metrics-dev.tsv` and `custom_metrics-test.tsv` under `results/<dataset>/<model>/` after the repeated runs finish.
+
+To aggregate experiment metrics into summary files:
+```
+python aggregate_result.py
+python aggregate_result.py --output-name custom_metrics.tsv
+```
+The second command creates per-model aggregate files such as `custom_metrics-dev.tsv` and `custom_metrics-test.tsv`.
 
 ## Citation
 Please cite our paper if you have used the code in your work. You can use the following BibTex citation:

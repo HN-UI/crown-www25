@@ -8,6 +8,25 @@ import numpy as np
 import json
 from prepare_dataset import prepare_MIND_small, prepare_MIND_large, preprocess_Adressa
 
+
+def output_name_arg(value):
+    value = value.strip()
+    if not value:
+        raise argparse.ArgumentTypeError('--output-name must not be empty.')
+    if os.path.basename(value) != value:
+        raise argparse.ArgumentTypeError('--output-name must be a file name, not a path.')
+    return value
+
+
+def path_component_arg(value):
+    value = value.strip()
+    if not value:
+        return ''
+    if os.path.basename(value) != value:
+        raise argparse.ArgumentTypeError('--exp_tag must be a single path component, not a path.')
+    return value
+
+
 class Config:
     def parse_argument(self):
         parser = argparse.ArgumentParser(description='Neural news recommendation')
@@ -46,6 +65,8 @@ class Config:
         parser.add_argument('--seed', type=int, default=0, help='Seed for random number generator')
         parser.add_argument('--num_runs', type=int, default=1, help='Number of repeated train/test runs in a single execution')
         parser.add_argument('--seed_step', type=int, default=1, help='Seed increment per repeated run')
+        parser.add_argument('--output-name', type=output_name_arg, default='experiment_results.tsv', help='Base file name for aggregated metric files after repeated runs')
+        parser.add_argument('--exp_tag', type=path_component_arg, default='', help='Optional experiment tag to isolate configs/models/results for hyperparameter sweeps')
         parser.add_argument('--config_file', type=str, default='', help='Config file path')
         # Dataset config
         parser.add_argument('--dataset', type=str, default='mind', choices=['mind', 'adressa'], help='Dataset type')
@@ -97,6 +118,49 @@ class Config:
             type=float,
             default=1.0,
             help='Additional loss weight for positives that were previously clicked (-1) by the same user'
+        )
+        parser.add_argument(
+            '--use_prev_nonclick_kl',
+            default=False,
+            action='store_true',
+            help='For candidates previously shown as non-clicked (-0), maximize KL divergence between user and news representations'
+        )
+        parser.add_argument(
+            '--prev_nonclick_kl_weight',
+            type=float,
+            default=0.0,
+            help='Loss weight lambda for previous-nonclick KL term; objective adds -lambda * KL'
+        )
+        parser.add_argument(
+            '--prev_nonclick_kl_temperature',
+            type=float,
+            default=1.0,
+            help='Softmax temperature for KL term over embedding dimensions'
+        )
+        parser.add_argument(
+            '--use_prev_nonclick_pairwise',
+            default=False,
+            action='store_true',
+            help='For repeated 0->0 negatives with no prior clicks, add an auxiliary pairwise loss against the current positive'
+        )
+        parser.add_argument(
+            '--prev_nonclick_pairwise_weight',
+            type=float,
+            default=0.0,
+            help='Loss weight lambda for previous-nonclick pairwise auxiliary term'
+        )
+        parser.add_argument(
+            '--prev_nonclick_pairwise_loss',
+            type=str,
+            default='log_sigmoid',
+            choices=['log_sigmoid', 'margin'],
+            help='Pairwise auxiliary loss type for previous-nonclick negatives'
+        )
+        parser.add_argument(
+            '--prev_nonclick_pairwise_margin',
+            type=float,
+            default=1.0,
+            help='Margin used when --prev_nonclick_pairwise_loss=margin'
         )
         parser.add_argument(
             '--use_run_length_negative_weight',
@@ -264,6 +328,11 @@ class Config:
         assert self.repeat_negative_weight > 0, '--repeat_negative_weight must be positive'
         assert self.repeat_negative_sampling_boost > 0, '--repeat_negative_sampling_boost must be positive'
         assert self.repeat_positive_weight > 0, '--repeat_positive_weight must be positive'
+        assert self.prev_nonclick_kl_weight >= 0, '--prev_nonclick_kl_weight must be non-negative'
+        assert self.prev_nonclick_kl_temperature > 0, '--prev_nonclick_kl_temperature must be positive'
+        assert self.prev_nonclick_pairwise_weight >= 0, '--prev_nonclick_pairwise_weight must be non-negative'
+        assert self.prev_nonclick_pairwise_loss in ['log_sigmoid', 'margin'], '--prev_nonclick_pairwise_loss must be one of {log_sigmoid, margin}'
+        assert self.prev_nonclick_pairwise_margin >= 0, '--prev_nonclick_pairwise_margin must be non-negative'
         assert self.run_length_weight_alpha >= 0, '--run_length_weight_alpha must be non-negative'
         assert self.run_length_weight_beta >= 0, '--run_length_weight_beta must be non-negative'
         assert self.run_length_weight_cap >= 1.0, '--run_length_weight_cap must be at least 1.0'
@@ -319,13 +388,16 @@ class Config:
                 #     prepare_function()
 
         model_name = self.news_encoder + '-' + self.user_encoder
+        model_subdir = model_name if self.exp_tag == '' else os.path.join(model_name, self.exp_tag)
+        self.model_name = model_name
+        self.model_subdir = model_subdir
         mkdirs = lambda x: os.makedirs(x) if not os.path.exists(x) else None
-        self.config_dir = 'configs/' + self.dataset_tag + '/' + model_name
-        self.model_dir = 'models/' + self.dataset_tag + '/' + model_name
-        self.best_model_dir = 'best_model/' + self.dataset_tag + '/' + model_name
-        self.dev_res_dir = 'dev/res/' + self.dataset_tag + '/' + model_name
-        self.test_res_dir = 'test/res/' + self.dataset_tag + '/' + model_name
-        self.result_dir = 'results/' + self.dataset_tag + '/' + model_name
+        self.config_dir = 'configs/' + self.dataset_tag + '/' + model_subdir
+        self.model_dir = 'models/' + self.dataset_tag + '/' + model_subdir
+        self.best_model_dir = 'best_model/' + self.dataset_tag + '/' + model_subdir
+        self.dev_res_dir = 'dev/res/' + self.dataset_tag + '/' + model_subdir
+        self.test_res_dir = 'test/res/' + self.dataset_tag + '/' + model_subdir
+        self.result_dir = 'results/' + self.dataset_tag + '/' + model_subdir
         mkdirs(self.config_dir)
         mkdirs(self.model_dir)
         mkdirs(self.best_model_dir)
@@ -352,7 +424,7 @@ class Config:
                             labels = [int(impression[-1]) for impression in impressions.strip().split(' ')]
                             truth_f.write(('' if test_ID == 0 else '\n') + str(test_ID + 1) + ' ' + str(labels).replace(' ', ''))
         else:
-            self.prediction_dir = 'prediction/' + self.dataset_tag + '/' + model_name
+            self.prediction_dir = 'prediction/' + self.dataset_tag + '/' + model_subdir
             mkdirs(self.prediction_dir)
 
 

@@ -106,7 +106,7 @@ class Model(nn.Module):
             nn.init.zeros_(self.fc.bias)
 
     def forward(self, user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
-                      news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity):
+                      news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity, return_representations=False):
         user_embedding = self.dropout(self.user_embedding(user_ID)) if self.use_user_embedding else None                                                                                                         # [batch_size, news_embedding_dim]
         news_representation = self.news_encoder(news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity, news_category, news_subCategory, user_embedding) # [batch_size, 1 + negative_sample_num, news_embedding_dim]
         user_representation = self.user_encoder(user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, news_category, user_category, user_subCategory, \
@@ -118,4 +118,6 @@ class Model(nn.Module):
             logits = self.out(context).squeeze(dim=2)
         elif self.click_predictor == 'FIM':
             logits = self.fc(user_representation).squeeze(dim=2)
+        if return_representations:
+            return logits, user_representation, news_representation
         return logits

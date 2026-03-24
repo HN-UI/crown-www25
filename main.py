@@ -7,6 +7,7 @@ from config import Config
 import torch
 from corpus import Corpus
 from model import Model
+from aggregate_result import aggregate_model_results, aggregate_overall_test_result, aggregate_result_dir, current_timestamp, split_output_name
 from trainer import Trainer, distributed_train
 from util import compute_scores, get_run_index
 import torch.multiprocessing as mp
@@ -80,6 +81,23 @@ def test(config, corpus):
         with open(config.test_output_file, 'w', encoding='utf-8') as f:
             f.write('#63' + '\t' + str(auc) + '\t' + str(mrr) + '\t' + str(ndcg5) + '\t' + str(ndcg10) + '\n')
 
+
+def aggregate_current_model_results(config):
+    timestamp = current_timestamp()
+    model_name = config.news_encoder + '-' + config.user_encoder
+    if getattr(config, 'exp_tag', '') != '':
+        labeled_name = model_name + '-' + config.exp_tag
+        dev_metrics, test_metrics = aggregate_result_dir(config.result_dir, labeled_name, config.output_name, timestamp)
+    else:
+        dev_metrics, test_metrics = aggregate_model_results(config.dataset_tag, model_name, config.output_name, timestamp)
+        aggregate_overall_test_result(config.dataset_tag, timestamp)
+
+    output_stem, output_ext = split_output_name(config.output_name)
+    if dev_metrics is not None:
+        print('Aggregated dev results : ' + os.path.join(config.result_dir, output_stem + '-dev' + output_ext))
+    if test_metrics is not None:
+        print('Aggregated test results : ' + os.path.join(config.result_dir, output_stem + '-test' + output_ext))
+
 # main.py
 if __name__ == '__main__':
     config = Config() # configuration
@@ -94,6 +112,7 @@ if __name__ == '__main__':
             train(config, data_corpus)
             config.test_model_path = config.best_model_dir + '/#' + str(config.run_index) + '/' + config.news_encoder + '-' + config.user_encoder
             test(config, data_corpus)
+        aggregate_current_model_results(config)
     elif config.mode == 'test':
         config.test_model_path = ''
         config.test_output_file = ''

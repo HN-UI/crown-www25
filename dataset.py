@@ -13,6 +13,8 @@ class Train_Dataset(data.Dataset):
         self.drop_repeated_positive_clicks = getattr(corpus, 'drop_repeated_positive_clicks', False)
         self.drop_prev_clicked_from_negatives = getattr(corpus, 'drop_prev_clicked_from_negatives', False)
         self.drop_prev_nonclicked_from_negatives = getattr(corpus, 'drop_prev_nonclicked_from_negatives', False)
+        self.use_prev_nonclick_kl = bool(getattr(corpus, 'use_prev_nonclick_kl', False))
+        self.use_prev_nonclick_pairwise = bool(getattr(corpus, 'use_prev_nonclick_pairwise', False))
         self.repeat_negative_weight = float(getattr(corpus, 'repeat_negative_weight', 1.0))
         self.repeat_negative_sampling_boost = float(getattr(corpus, 'repeat_negative_sampling_boost', 1.0))
         self.repeat_positive_weight = float(getattr(corpus, 'repeat_positive_weight', 1.0))
@@ -48,6 +50,8 @@ class Train_Dataset(data.Dataset):
         self.train_samples = [[0 for _ in range(1 + self.negative_sample_num)] for __ in range(len(self.train_behaviors))]
         self.train_positive_weights = np.ones([len(self.train_behaviors)], dtype=np.float32)
         self.train_negative_weights = np.ones([len(self.train_behaviors), self.negative_sample_num], dtype=np.float32)
+        self.train_prev_nonclicked_positive_flags = np.zeros([len(self.train_behaviors)], dtype=np.float32)
+        self.train_prev_nonclicked_negative_flags = np.zeros([len(self.train_behaviors), self.negative_sample_num], dtype=np.float32)
         self.num = len(self.train_behaviors)
         self.prior_clicked_by_behavior = {}
         self.current_clicked_run_length_by_behavior = {}
@@ -55,7 +59,7 @@ class Train_Dataset(data.Dataset):
         self.current_nonclicked_run_length_by_behavior = {}
         if self.drop_prev_clicked_from_negatives or self.use_repeat_positive_weight or self.use_run_length_positive_weight:
             self._build_prior_clicked_map()
-        if self.drop_prev_nonclicked_from_negatives or self.use_repeat_negative_weight or self.use_run_length_negative_weight or self.use_repeat_negative_sampling_boost:
+        if self.drop_prev_nonclicked_from_negatives or self.use_prev_nonclick_kl or self.use_prev_nonclick_pairwise or self.use_repeat_negative_weight or self.use_run_length_negative_weight or self.use_repeat_negative_sampling_boost:
             self._build_prior_nonclicked_map()
 
     def _filter_repeated_positive_behaviors(self, train_behaviors):
@@ -203,12 +207,19 @@ class Train_Dataset(data.Dataset):
             self.train_samples[i][0] = positive_news
             self.train_positive_weights[i] = 1.0
             self.train_negative_weights[i].fill(1.0)
+            self.train_prev_nonclicked_positive_flags[i] = 0.0
+            self.train_prev_nonclicked_negative_flags[i].fill(0.0)
             negative_samples = train_behavior[4]
             behavior_key = (train_behavior[0], train_behavior[5])
             prior_clicked = self.prior_clicked_by_behavior.get(behavior_key, set())
             current_clicked_run_lengths = self.current_clicked_run_length_by_behavior.get(behavior_key, {})
             prior_nonclicked = self.prior_nonclicked_by_behavior.get(behavior_key, set())
             current_nonclicked_run_lengths = self.current_nonclicked_run_length_by_behavior.get(behavior_key, {})
+            # Auxiliary objectives for previous non-clicks are only applied to news
+            # that never appeared as a prior positive (e.g. allow 0-0 / 0-0-0, exclude 1-0-0).
+            kl_eligible_prior_nonclicked = prior_nonclicked.difference(prior_clicked)
+            if positive_news in kl_eligible_prior_nonclicked:
+                self.train_prev_nonclicked_positive_flags[i] = 1.0
 
             if self.use_run_length_positive_weight:
                 run_length = current_clicked_run_lengths.get(positive_news, 1)
@@ -248,6 +259,8 @@ class Train_Dataset(data.Dataset):
                 sampled_negative = negative_samples[sampled_idx]
                 if boosted_candidate_count > 0 and sampled_negative in prior_nonclicked:
                     sampling_boosted_negatives += 1
+                if sampled_negative in kl_eligible_prior_nonclicked:
+                    self.train_prev_nonclicked_negative_flags[i][j] = 1.0
                 is_weighted_negative, assigned_weight = self._assign_negative_sample(
                     i,
                     j,
@@ -326,6 +339,8 @@ class Train_Dataset(data.Dataset):
     # news_abstract_entity          : [1 + negative_sample_num, max_abstract_length]
     # positive_weight               : [1]
     # negative_weights              : [negative_sample_num]
+    # prev_nonclicked_positive_flag : [1]
+    # prev_nonclicked_negative_flags: [negative_sample_num]
 
     def __getitem__(self, index):
         train_behavior = self.train_behaviors[index]
@@ -333,7 +348,7 @@ class Train_Dataset(data.Dataset):
         sample_index = self.train_samples[index]
         behavior_index = train_behavior[5]
         return train_behavior[0], self.news_category[history_index], self.news_subCategory[history_index], self.news_title_text[history_index], self.news_title_mask[history_index], self.news_title_entity[history_index], self.news_abstract_text[history_index], self.news_abstract_mask[history_index], self.news_abstract_entity[history_index], train_behavior[2], self.user_history_graph[behavior_index], self.user_history_category_mask[behavior_index], self.user_history_category_indices[behavior_index], \
-               self.news_category[sample_index], self.news_subCategory[sample_index], self.news_title_text[sample_index], self.news_title_mask[sample_index], self.news_title_entity[sample_index], self.news_abstract_text[sample_index], self.news_abstract_mask[sample_index], self.news_abstract_entity[sample_index], self.train_positive_weights[index], self.train_negative_weights[index]
+               self.news_category[sample_index], self.news_subCategory[sample_index], self.news_title_text[sample_index], self.news_title_mask[sample_index], self.news_title_entity[sample_index], self.news_abstract_text[sample_index], self.news_abstract_mask[sample_index], self.news_abstract_entity[sample_index], self.train_positive_weights[index], self.train_negative_weights[index], self.train_prev_nonclicked_positive_flags[index], self.train_prev_nonclicked_negative_flags[index]
 
     def __len__(self):
         return self.num
@@ -405,7 +420,7 @@ if __name__ == '__main__':
     print('Train_Dataset :', len(train_dataset))
     train_dataloader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=config.batch_size // 16)
     for (user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_abstract_text, user_abstract_mask, user_abstract_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
-         news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_abstract_text, news_abstract_mask, news_abstract_entity, positive_weights, negative_weights) in train_dataloader:
+         news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_abstract_text, news_abstract_mask, news_abstract_entity, positive_weights, negative_weights, prev_nonclicked_positive_flags, prev_nonclicked_negative_flags) in train_dataloader:
         print('user_ID', user_ID.size(), user_ID.dtype)
         print('user_category', user_category.size(), user_category.dtype)
         print('user_subCategory', user_subCategory.size(), user_subCategory.dtype)
@@ -429,6 +444,8 @@ if __name__ == '__main__':
         print('news_abstract_entity', news_abstract_entity.size(), news_abstract_entity.dtype)
         print('positive_weights', positive_weights.size(), positive_weights.dtype)
         print('negative_weights', negative_weights.size(), negative_weights.dtype)
+        print('prev_nonclicked_positive_flags', prev_nonclicked_positive_flags.size(), prev_nonclicked_positive_flags.dtype)
+        print('prev_nonclicked_negative_flags', prev_nonclicked_negative_flags.size(), prev_nonclicked_negative_flags.dtype)
         break
     print('Dev_Dataset :', len(dev_dataset))
     dev_dataloader = DataLoader(dev_dataset, batch_size=config.batch_size, shuffle=False, num_workers=config.batch_size // 16)

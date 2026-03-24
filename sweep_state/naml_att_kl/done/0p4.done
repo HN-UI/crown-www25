@@ -1,0 +1,5 @@
+weight=0.4
+script_tag=run2
+gpu_id=1
+completed_at=2026-03-23 16:33:03
+log_file=logs/run2_NAML_ATT_KL_0.4.log

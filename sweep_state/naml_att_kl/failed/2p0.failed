@@ -1,0 +1,6 @@
+weight=2.0
+script_tag=run0
+gpu_id=0
+failed_at=2026-03-23 10:51:59
+status=1
+log_file=logs/run0_NAML_ATT_KL_2.0.log

@@ -328,6 +328,8 @@ class Corpus:
         self.drop_repeated_positive_clicks = config.drop_repeated_positive_clicks                       # drop repeated positive clicks for each user
         self.drop_prev_clicked_from_negatives = config.drop_prev_clicked_from_negatives                 # drop previously clicked news from current negative candidates
         self.drop_prev_nonclicked_from_negatives = config.drop_prev_nonclicked_from_negatives           # drop previously non-clicked news from current negative candidates
+        self.use_prev_nonclick_kl = config.use_prev_nonclick_kl                                         # add KL divergence term for previously non-clicked candidates
+        self.use_prev_nonclick_pairwise = config.use_prev_nonclick_pairwise                             # add pairwise auxiliary term for repeated 0->0 negatives without prior clicks
         self.repeat_negative_weight = config.repeat_negative_weight                                      # extra loss weight for repeated 0->0 negatives
         self.repeat_negative_sampling_boost = config.repeat_negative_sampling_boost                      # sampling boost for repeated 0->0 negatives
         self.repeat_positive_weight = config.repeat_positive_weight                                      # extra loss weight for repeated 1->1 positives

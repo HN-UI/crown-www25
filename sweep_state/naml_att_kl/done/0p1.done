@@ -1,0 +1,5 @@
+weight=0.1
+script_tag=run0
+gpu_id=0
+completed_at=2026-03-24 02:48:27
+log_file=logs/run0_NAML_ATT_KL_0.1.log

@@ -12,9 +12,47 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+
+def prev_nonclick_pairwise_loss(logits, prev_nonclicked_negative_flags, loss_type, margin):
+    if logits.dim() != 2:
+        return logits.new_zeros(()), 0
+    negative_logits = logits[:, 1:]
+    if negative_logits.size() != prev_nonclicked_negative_flags.size():
+        return logits.new_zeros(()), 0
+    pairwise_mask = prev_nonclicked_negative_flags.bool()
+    selected_count = int(pairwise_mask.sum().item())
+    if selected_count == 0:
+        return logits.new_zeros(()), 0
+    positive_logits = logits[:, :1].expand_as(negative_logits)
+    score_diff = positive_logits[pairwise_mask] - negative_logits[pairwise_mask]
+    if loss_type == 'margin':
+        pairwise_term = F.relu(float(margin) - score_diff).mean()
+    else:
+        pairwise_term = -F.logsigmoid(score_diff).mean()
+    return pairwise_term, selected_count
+
+
+def prev_nonclick_kl_loss(user_representation, news_representation, prev_nonclicked_positive_flags, prev_nonclicked_negative_flags, temperature):
+    if user_representation.dim() != 3 or news_representation.dim() != 3:
+        return user_representation.new_zeros(()), 0
+    if user_representation.size() != news_representation.size():
+        return user_representation.new_zeros(()), 0
+    prev_nonclicked_mask = torch.cat([prev_nonclicked_positive_flags.unsqueeze(1), prev_nonclicked_negative_flags], dim=1).bool()
+    selected_count = int(prev_nonclicked_mask.sum().item())
+    if selected_count == 0:
+        return user_representation.new_zeros(()), 0
+    selected_user_rep = user_representation[prev_nonclicked_mask]
+    selected_news_rep = news_representation[prev_nonclicked_mask]
+    temperature = max(float(temperature), 1e-6)
+    user_log_prob = F.log_softmax(selected_user_rep / temperature, dim=-1)
+    news_log_prob = F.log_softmax(selected_news_rep / temperature, dim=-1)
+    kl_term = F.kl_div(news_log_prob, user_log_prob, reduction='batchmean', log_target=True)
+    return kl_term, selected_count
 
 
 class Trainer:
@@ -60,6 +98,13 @@ class Trainer:
         self.best_dev_avg = AvgMetric(0, 0, 0, 0)
         self.epoch_not_increase = 0
         self.gradient_clip_norm = config.gradient_clip_norm
+        self.use_prev_nonclick_kl = config.use_prev_nonclick_kl and config.prev_nonclick_kl_weight > 0
+        self.prev_nonclick_kl_weight = config.prev_nonclick_kl_weight
+        self.prev_nonclick_kl_temperature = config.prev_nonclick_kl_temperature
+        self.use_prev_nonclick_pairwise = config.use_prev_nonclick_pairwise and config.prev_nonclick_pairwise_weight > 0
+        self.prev_nonclick_pairwise_weight = config.prev_nonclick_pairwise_weight
+        self.prev_nonclick_pairwise_loss_type = config.prev_nonclick_pairwise_loss
+        self.prev_nonclick_pairwise_margin = config.prev_nonclick_pairwise_margin
         self.model.cuda()
         print('Running : ' + self.model.model_name + '\t#' + str(self.run_index))
 
@@ -95,6 +140,23 @@ class Trainer:
         loss = -(positive_term + negative_term) / torch.clamp(normalizer, min=1.0)
         return loss
 
+    def prev_nonclick_kl_loss(self, user_representation, news_representation, prev_nonclicked_positive_flags, prev_nonclicked_negative_flags):
+        return prev_nonclick_kl_loss(
+            user_representation,
+            news_representation,
+            prev_nonclicked_positive_flags,
+            prev_nonclicked_negative_flags,
+            self.prev_nonclick_kl_temperature,
+        )
+
+    def prev_nonclick_pairwise_loss(self, logits, prev_nonclicked_negative_flags):
+        return prev_nonclick_pairwise_loss(
+            logits,
+            prev_nonclicked_negative_flags,
+            self.prev_nonclick_pairwise_loss_type,
+            self.prev_nonclick_pairwise_margin,
+        )
+
     def train(self):
         model = self.model
         for e in tqdm(range(1, self.epoch + 1)):
@@ -102,8 +164,12 @@ class Trainer:
             train_dataloader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.batch_size // 16, pin_memory=True)
             model.train()
             epoch_loss = 0
+            epoch_kl_term = 0
+            epoch_kl_samples = 0
+            epoch_pairwise_term = 0
+            epoch_pairwise_samples = 0
             for (user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
-                news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity, positive_weights, negative_weights) in train_dataloader:
+                news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity, positive_weights, negative_weights, prev_nonclicked_positive_flags, prev_nonclicked_negative_flags) in train_dataloader:
                 user_ID = user_ID.cuda(non_blocking=True)                                                                                                                       # [batch_size]
                 user_category = user_category.cuda(non_blocking=True)                                                                                                           # [batch_size, max_history_num]
                 user_subCategory = user_subCategory.cuda(non_blocking=True)                                                                                                     # [batch_size, max_history_num]
@@ -127,11 +193,29 @@ class Trainer:
                 news_content_entity = news_content_entity.cuda(non_blocking=True)                                                                                               # [batch_size, 1 + negative_sample_num, max_content_length]
                 positive_weights = positive_weights.cuda(non_blocking=True).float()                                                                                             # [batch_size]
                 negative_weights = negative_weights.cuda(non_blocking=True).float()                                                                                             # [batch_size, negative_sample_num]
+                prev_nonclicked_positive_flags = prev_nonclicked_positive_flags.cuda(non_blocking=True).float()                                                                 # [batch_size]
+                prev_nonclicked_negative_flags = prev_nonclicked_negative_flags.cuda(non_blocking=True).float()                                                                 # [batch_size, negative_sample_num]
 
-                logits = model(user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
-                               news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity) # [batch_size, 1 + negative_sample_num]
+                if self.use_prev_nonclick_kl:
+                    logits, user_representation, news_representation = model(user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
+                                                                              news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity, return_representations=True) # [batch_size, 1 + negative_sample_num], [batch_size, 1 + negative_sample_num, news_embedding_dim], [batch_size, 1 + negative_sample_num, news_embedding_dim]
+                else:
+                    logits = model(user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
+                                   news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity) # [batch_size, 1 + negative_sample_num]
                 
                 loss = self.loss(logits, positive_weights, negative_weights)
+                if self.use_prev_nonclick_kl:
+                    kl_term, kl_sample_count = self.prev_nonclick_kl_loss(user_representation, news_representation, prev_nonclicked_positive_flags, prev_nonclicked_negative_flags)
+                    if kl_sample_count > 0:
+                        loss -= self.prev_nonclick_kl_weight * kl_term
+                        epoch_kl_term += float(kl_term.detach()) * kl_sample_count
+                        epoch_kl_samples += kl_sample_count
+                if self.use_prev_nonclick_pairwise:
+                    pairwise_term, pairwise_sample_count = self.prev_nonclick_pairwise_loss(logits, prev_nonclicked_negative_flags)
+                    if pairwise_sample_count > 0:
+                        loss += self.prev_nonclick_pairwise_weight * pairwise_term
+                        epoch_pairwise_term += float(pairwise_term.detach()) * pairwise_sample_count
+                        epoch_pairwise_samples += pairwise_sample_count
                 if model.news_encoder.auxiliary_loss is not None:
                     news_auxiliary_loss = model.news_encoder.auxiliary_loss.mean()
                     loss += news_auxiliary_loss
@@ -146,6 +230,28 @@ class Trainer:
                 self.optimizer.step()
             print('Epoch %d : train done' % e)
             print('loss =', epoch_loss / len(self.train_dataset))
+            if self.use_prev_nonclick_kl:
+                if epoch_kl_samples > 0:
+                    print('prev_nonclick_kl = %.6f (samples=%d, weight=%.6f, temperature=%.3f)' %
+                          (epoch_kl_term / epoch_kl_samples, epoch_kl_samples, self.prev_nonclick_kl_weight, self.prev_nonclick_kl_temperature))
+                else:
+                    print('prev_nonclick_kl = N/A (samples=0, weight=%.6f, temperature=%.3f)' %
+                          (self.prev_nonclick_kl_weight, self.prev_nonclick_kl_temperature))
+            if self.use_prev_nonclick_pairwise:
+                if epoch_pairwise_samples > 0:
+                    if self.prev_nonclick_pairwise_loss_type == 'margin':
+                        print('prev_nonclick_pairwise = %.6f (pairs=%d, weight=%.6f, loss=%s, margin=%.3f)' %
+                              (epoch_pairwise_term / epoch_pairwise_samples, epoch_pairwise_samples, self.prev_nonclick_pairwise_weight, self.prev_nonclick_pairwise_loss_type, self.prev_nonclick_pairwise_margin))
+                    else:
+                        print('prev_nonclick_pairwise = %.6f (pairs=%d, weight=%.6f, loss=%s)' %
+                              (epoch_pairwise_term / epoch_pairwise_samples, epoch_pairwise_samples, self.prev_nonclick_pairwise_weight, self.prev_nonclick_pairwise_loss_type))
+                else:
+                    if self.prev_nonclick_pairwise_loss_type == 'margin':
+                        print('prev_nonclick_pairwise = N/A (pairs=0, weight=%.6f, loss=%s, margin=%.3f)' %
+                              (self.prev_nonclick_pairwise_weight, self.prev_nonclick_pairwise_loss_type, self.prev_nonclick_pairwise_margin))
+                    else:
+                        print('prev_nonclick_pairwise = N/A (pairs=0, weight=%.6f, loss=%s)' %
+                              (self.prev_nonclick_pairwise_weight, self.prev_nonclick_pairwise_loss_type))
             
             # validation
             auc, mrr, ndcg5, ndcg10 = compute_scores(model, self._corpus, self.batch_size, 'dev', self.dev_res_dir + '/' + model.model_name + '-' + str(e) + '.txt', self._dataset)
@@ -275,6 +381,13 @@ def distributed_train(rank, model: nn.Module, config: Config, corpus: Corpus, ru
     model = DDP(model, device_ids=[rank])
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.module.parameters()), lr=config.lr, weight_decay=config.weight_decay)
     gradient_clip_norm = config.gradient_clip_norm
+    use_prev_nonclick_kl = config.use_prev_nonclick_kl and config.prev_nonclick_kl_weight > 0
+    prev_nonclick_kl_weight = config.prev_nonclick_kl_weight
+    prev_nonclick_kl_temperature = config.prev_nonclick_kl_temperature
+    use_prev_nonclick_pairwise = config.use_prev_nonclick_pairwise and config.prev_nonclick_pairwise_weight > 0
+    prev_nonclick_pairwise_weight = config.prev_nonclick_pairwise_weight
+    prev_nonclick_pairwise_loss_type = config.prev_nonclick_pairwise_loss
+    prev_nonclick_pairwise_margin = config.prev_nonclick_pairwise_margin
     train_dataset = Train_Dataset(corpus)
     if rank == 0:
         model_dir = config.model_dir + '/#' + str(run_index)
@@ -314,8 +427,12 @@ def distributed_train(rank, model: nn.Module, config: Config, corpus: Corpus, ru
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=batch_size // 16, pin_memory=True, sampler=train_sampler)
         model.train()
         epoch_loss = 0
+        epoch_kl_term = 0
+        epoch_kl_samples = 0
+        epoch_pairwise_term = 0
+        epoch_pairwise_samples = 0
         for (user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
-            news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity, positive_weights, negative_weights) in train_dataloader:
+            news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity, positive_weights, negative_weights, prev_nonclicked_positive_flags, prev_nonclicked_negative_flags) in train_dataloader:
             user_ID = user_ID.cuda(non_blocking=True)                                                                                                                       # [batch_size]
             user_category = user_category.cuda(non_blocking=True)                                                                                                           # [batch_size, max_history_num]
             user_subCategory = user_subCategory.cuda(non_blocking=True)                                                                                                     # [batch_size, max_history_num]
@@ -339,11 +456,29 @@ def distributed_train(rank, model: nn.Module, config: Config, corpus: Corpus, ru
             news_content_entity = news_content_entity.cuda(non_blocking=True)                                                                                               # [batch_size, 1 + negative_sample_num, max_content_length]
             positive_weights = positive_weights.cuda(non_blocking=True).float()                                                                                             # [batch_size]
             negative_weights = negative_weights.cuda(non_blocking=True).float()                                                                                             # [batch_size, negative_sample_num]
+            prev_nonclicked_positive_flags = prev_nonclicked_positive_flags.cuda(non_blocking=True).float()                                                                 # [batch_size]
+            prev_nonclicked_negative_flags = prev_nonclicked_negative_flags.cuda(non_blocking=True).float()                                                                 # [batch_size, negative_sample_num]
 
-            logits = model(user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
-                           news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity) # [batch_size, 1 + negative_sample_num]
+            if use_prev_nonclick_kl:
+                logits, user_representation, news_representation = model(user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
+                                                                          news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity, return_representations=True) # [batch_size, 1 + negative_sample_num], [batch_size, 1 + negative_sample_num, news_embedding_dim], [batch_size, 1 + negative_sample_num, news_embedding_dim]
+            else:
+                logits = model(user_ID, user_category, user_subCategory, user_title_text, user_title_mask, user_title_entity, user_content_text, user_content_mask, user_content_entity, user_history_mask, user_history_graph, user_history_category_mask, user_history_category_indices, \
+                               news_category, news_subCategory, news_title_text, news_title_mask, news_title_entity, news_content_text, news_content_mask, news_content_entity) # [batch_size, 1 + negative_sample_num]
 
             loss = loss_(logits, positive_weights, negative_weights)
+            if use_prev_nonclick_kl:
+                kl_term, kl_sample_count = prev_nonclick_kl_loss(user_representation, news_representation, prev_nonclicked_positive_flags, prev_nonclicked_negative_flags, prev_nonclick_kl_temperature)
+                if kl_sample_count > 0:
+                    loss -= prev_nonclick_kl_weight * kl_term
+                    epoch_kl_term += float(kl_term.detach()) * kl_sample_count
+                    epoch_kl_samples += kl_sample_count
+            if use_prev_nonclick_pairwise:
+                pairwise_term, pairwise_sample_count = prev_nonclick_pairwise_loss(logits, prev_nonclicked_negative_flags, prev_nonclick_pairwise_loss_type, prev_nonclick_pairwise_margin)
+                if pairwise_sample_count > 0:
+                    loss += prev_nonclick_pairwise_weight * pairwise_term
+                    epoch_pairwise_term += float(pairwise_term.detach()) * pairwise_sample_count
+                    epoch_pairwise_samples += pairwise_sample_count
             if model.module.news_encoder.auxiliary_loss is not None:
                 news_auxiliary_loss = model.module.news_encoder.auxiliary_loss.mean()
                 loss += news_auxiliary_loss
@@ -358,6 +493,28 @@ def distributed_train(rank, model: nn.Module, config: Config, corpus: Corpus, ru
             optimizer.step()
         print('rank %d : Epoch %d : train done' % (rank, e))
         print('rank %d : loss = %.6f' % (rank, epoch_loss / len(train_dataset) * world_size))
+        if use_prev_nonclick_kl:
+            if epoch_kl_samples > 0:
+                print('rank %d : prev_nonclick_kl = %.6f (samples=%d, weight=%.6f, temperature=%.3f)' %
+                      (rank, epoch_kl_term / epoch_kl_samples, epoch_kl_samples, prev_nonclick_kl_weight, prev_nonclick_kl_temperature))
+            else:
+                print('rank %d : prev_nonclick_kl = N/A (samples=0, weight=%.6f, temperature=%.3f)' %
+                      (rank, prev_nonclick_kl_weight, prev_nonclick_kl_temperature))
+        if use_prev_nonclick_pairwise:
+            if epoch_pairwise_samples > 0:
+                if prev_nonclick_pairwise_loss_type == 'margin':
+                    print('rank %d : prev_nonclick_pairwise = %.6f (pairs=%d, weight=%.6f, loss=%s, margin=%.3f)' %
+                          (rank, epoch_pairwise_term / epoch_pairwise_samples, epoch_pairwise_samples, prev_nonclick_pairwise_weight, prev_nonclick_pairwise_loss_type, prev_nonclick_pairwise_margin))
+                else:
+                    print('rank %d : prev_nonclick_pairwise = %.6f (pairs=%d, weight=%.6f, loss=%s)' %
+                          (rank, epoch_pairwise_term / epoch_pairwise_samples, epoch_pairwise_samples, prev_nonclick_pairwise_weight, prev_nonclick_pairwise_loss_type))
+            else:
+                if prev_nonclick_pairwise_loss_type == 'margin':
+                    print('rank %d : prev_nonclick_pairwise = N/A (pairs=0, weight=%.6f, loss=%s, margin=%.3f)' %
+                          (rank, prev_nonclick_pairwise_weight, prev_nonclick_pairwise_loss_type, prev_nonclick_pairwise_margin))
+                else:
+                    print('rank %d : prev_nonclick_pairwise = N/A (pairs=0, weight=%.6f, loss=%s)' %
+                          (rank, prev_nonclick_pairwise_weight, prev_nonclick_pairwise_loss_type))
 
         # dev
         if rank == 0:
